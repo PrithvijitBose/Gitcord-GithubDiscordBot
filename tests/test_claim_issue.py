@@ -145,8 +145,12 @@ def test_build_mentor_claim_card() -> None:
     assert "Issue Request: #105" in header
     assert "alex-dev" in header
     assert "<@111>" in header
-    assert embed["title"] == "🧾 Issue assignment request"
-    assert any(f["name"] == "Eligibility" for f in embed["fields"])
+    assert not any(
+        f["name"] in {"Required roles for assignment", "Eligibility"}
+        for f in embed["fields"]
+    )
+    assert any(f["name"] == "Contributor" for f in embed["fields"])
+    assert any(f["name"] == "Activity" for f in embed["fields"])
 
 
 def test_process_claim_approval_success() -> None:
@@ -269,6 +273,7 @@ def test_process_claim_decline() -> None:
         request_id="req_1",
         mentor_discord_id="999",
         mentor_github="mentor-dev",
+        note="Assigned to another contributor who requested earlier",
     )
 
     assert ok is True
@@ -278,6 +283,45 @@ def test_process_claim_decline() -> None:
     event = storage.append_audit_event.call_args[0][0]
     assert event["event_type"] == "issue_request_rejected"
     assert event["context"]["requester"] == "alex-dev"
+    assert event["context"]["mentor_note"] == "Assigned to another contributor who requested earlier"
+
+
+def test_process_claim_approval_with_note() -> None:
+    """Verify approval includes mentor note in audit event context."""
+    storage = MagicMock()
+    github_adapter = MagicMock()
+    github_adapter.assign_issue.return_value = True
+
+    storage.get_issue_request.return_value = {
+        "request_id": "req_1",
+        "status": "pending",
+        "owner": "AOSSIE-Org",
+        "repo": "Gitcord",
+        "issue_number": 105,
+        "github_user": "alex-dev",
+        "discord_user_id": "111",
+    }
+
+    policy = MutationPolicy(
+        mode=RunMode.ACTIVE,
+        github_write_allowed=True,
+        discord_write_allowed=True,
+    )
+
+    ok, _msg, _req = process_claim_approval(
+        storage=storage,
+        github_adapter=github_adapter,
+        policy=policy,
+        request_id="req_1",
+        mentor_discord_id="999",
+        mentor_github="mentor-dev",
+        note="Please check CONTRIBUTING.md for formatting guidelines",
+    )
+
+    assert ok is True
+    event = storage.append_audit_event.call_args[0][0]
+    assert event["context"]["mentor_note"] == "Please check CONTRIBUTING.md for formatting guidelines"
+
 
 
 def test_announcement_includes_claim_components() -> None:

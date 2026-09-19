@@ -33,33 +33,45 @@ def slash_command_allowed(
 ) -> bool:
     """Return True if the member may run this slash command."""
     member = interaction.user
-    if not _is_guild_member_like(member):
-        return False
+    if not _is_guild_member_like(member) and getattr(interaction, "guild", None):
+        guild_member = interaction.guild.get_member(interaction.user.id)
+        if guild_member is not None:
+            member = guild_member
 
-    if getattr(config.discord, "unrestricted_slash_commands", False):
-        return True
+    user_id = str(getattr(interaction.user, "id", "")).strip()
 
     perms = getattr(config.discord, "command_permissions", None)
     rule: SlashCommandPermissionRule | None = None
     if perms and command_name in perms:
         rule = perms[command_name]
 
+    if rule is not None and getattr(rule, "user_ids", None) and (
+        user_id in {str(uid).strip() for uid in rule.user_ids if str(uid).strip()}
+    ):
+        return True
+
+    if getattr(config.discord, "unrestricted_slash_commands", False):
+        return True
+
+    if not _is_guild_member_like(member):
+        return False
+
     if rule is None:
         if allow_all_by_default:
             return True
         return _legacy_issue_assignee_allowed(member, config)
 
-    if rule.allow_discord_administrators and member.guild_permissions.administrator:
+    if rule.allow_discord_administrators and getattr(member.guild_permissions, "administrator", False):
         return True
 
     id_allow = {str(rid).strip() for rid in rule.role_ids if str(rid).strip()}
-    for role in member.roles:
+    for role in getattr(member, "roles", []):
         if str(role.id) in id_allow:
             return True
 
     if rule.role_names:
         allowed_names = set(rule.role_names)
-        user_role_names = {r.name for r in member.roles}
+        user_role_names = {r.name for r in getattr(member, "roles", [])}
         if user_role_names & allowed_names:
             return True
 
@@ -83,6 +95,8 @@ def format_slash_command_permission_denied(config: BotConfig, command_name: str)
         )
 
     bits: list[str] = []
+    if getattr(rule, "user_ids", None):
+        bits.append("user ID(s): " + ", ".join(str(u) for u in rule.user_ids))
     if rule.role_ids:
         bits.append("role ID(s): " + ", ".join(str(r) for r in rule.role_ids))
     if rule.role_names:

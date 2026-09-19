@@ -75,6 +75,7 @@ class SlashCommandPermissionRule(BaseModel):
 
     role_ids: list[str] = Field(default_factory=list)
     role_names: list[str] = Field(default_factory=list)
+    user_ids: list[str] = Field(default_factory=list)
     allow_discord_administrators: bool = False
 
 

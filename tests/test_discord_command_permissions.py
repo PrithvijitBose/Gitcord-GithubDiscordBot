@@ -238,3 +238,29 @@ def test_assign_issue_configured_rule_path() -> None:
     
     # Existing manage-assignees / legacy fallback behavior still applies when omitted
     assert slash_command_allowed(_interaction(_member((1, "Mentor"))), config, "manage-assignees") is True
+
+
+def test_command_permissions_user_id_match() -> None:
+    """Ensure user_ids directly authorize specific Discord members."""
+    config = BotConfig.model_validate(
+        _minimal_config_payload(
+            command_permissions={
+                "claim-approval": SlashCommandPermissionRule(
+                    user_ids=["1354117522189979739"],
+                    role_names=["Mentor"],
+                ),
+            },
+        ),
+    )
+    user_member = SimpleNamespace(
+        id=1354117522189979739,
+        roles=[SimpleNamespace(id=99, name="RegularUser")],
+        guild_permissions=SimpleNamespace(administrator=False),
+    )
+    other_member = SimpleNamespace(
+        id=9999999999999999999,
+        roles=[SimpleNamespace(id=99, name="RegularUser")],
+        guild_permissions=SimpleNamespace(administrator=False),
+    )
+    assert slash_command_allowed(_interaction(user_member), config, "claim-approval") is True
+    assert slash_command_allowed(_interaction(other_member), config, "claim-approval") is False

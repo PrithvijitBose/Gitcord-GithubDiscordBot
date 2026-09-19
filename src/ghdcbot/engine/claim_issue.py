@@ -181,6 +181,13 @@ def build_mentor_claim_card(
         now=now,
     )
 
+    # Exclude verbose role requirement and eligibility verdict fields for clean display
+    embed_dict["fields"] = [
+        f
+        for f in embed_dict.get("fields", [])
+        if f.get("name") not in {"Required roles for assignment", "Eligibility"}
+    ]
+
     header_text = (
         f"🔔 **Issue Request: #{issue_number}** in `{owner}/{repo}`\n"
         f"**Requester:** `{github_user}` (<@{discord_user_id}>)"
@@ -196,6 +203,7 @@ def process_claim_approval(
     request_id: str,
     mentor_discord_id: str,
     mentor_github: str | None = None,
+    note: str | None = None,
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Approve a claim request, assign on GitHub, update SQLite, and audit.
 
@@ -253,18 +261,21 @@ def process_claim_approval(
 
     append_audit = getattr(storage, "append_audit_event", None)
     if callable(append_audit):
+        audit_context = {
+            "request_id": request_id,
+            "repo": f"{owner}/{repo}",
+            "issue_number": issue_number,
+            "mentor_discord_id": mentor_discord_id,
+            "mentor_github": mentor_github,
+            "contributor_discord_id": req["discord_user_id"],
+            "assignee": requester_github,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        if note:
+            audit_context["mentor_note"] = note
         append_audit({
             "event_type": "issue_request_approved",
-            "context": {
-                "request_id": request_id,
-                "repo": f"{owner}/{repo}",
-                "issue_number": issue_number,
-                "mentor_discord_id": mentor_discord_id,
-                "mentor_github": mentor_github,
-                "contributor_discord_id": req["discord_user_id"],
-                "assignee": requester_github,
-                "timestamp": datetime.now(UTC).isoformat(),
-            },
+            "context": audit_context,
         })
 
     return True, f"Approved and assigned @{requester_github} to #{issue_number}.", req
@@ -275,6 +286,7 @@ def process_claim_decline(
     request_id: str,
     mentor_discord_id: str,
     mentor_github: str | None = None,
+    note: str | None = None,
 ) -> tuple[bool, str, dict[str, Any] | None]:
     """Decline an issue claim request, update SQLite status to rejected, and audit.
 
@@ -294,18 +306,22 @@ def process_claim_decline(
 
     append_audit = getattr(storage, "append_audit_event", None)
     if callable(append_audit):
+        audit_context = {
+            "request_id": request_id,
+            "repo": f"{req['owner']}/{req['repo']}",
+            "issue_number": int(req['issue_number']),
+            "mentor_discord_id": mentor_discord_id,
+            "mentor_github": mentor_github,
+            "contributor_discord_id": req["discord_user_id"],
+            "requester": req["github_user"],
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        if note:
+            audit_context["mentor_note"] = note
         append_audit({
             "event_type": "issue_request_rejected",
-            "context": {
-                "request_id": request_id,
-                "repo": f"{req['owner']}/{req['repo']}",
-                "issue_number": int(req['issue_number']),
-                "mentor_discord_id": mentor_discord_id,
-                "mentor_github": mentor_github,
-                "contributor_discord_id": req["discord_user_id"],
-                "requester": req["github_user"],
-                "timestamp": datetime.now(UTC).isoformat(),
-            },
+            "context": audit_context,
         })
 
     return True, f"Declined claim request for #{req['issue_number']}.", req
+

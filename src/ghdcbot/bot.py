@@ -217,6 +217,49 @@ class MentorClaimPromptView(discord.ui.View):
         self.add_item(decline_btn)
 
 
+class ClaimFeedbackModal(discord.ui.Modal):
+    """Modal dialog for mentors to provide optional suggestions or feedback on claim actions."""
+
+    def __init__(
+        self,
+        action: str,
+        request_id: str,
+        source_message: discord.Message | None,
+        callback: Any,
+    ) -> None:
+        title = "Approve Claim Request" if action == "approve" else "Decline Claim Request"
+        super().__init__(title=title)
+        self.action = action
+        self.request_id = request_id
+        self.source_message = source_message
+        self.callback = callback
+
+        if action == "approve":
+            self.message_input = discord.ui.TextInput(
+                label="Suggestions / Guidance (Optional)",
+                style=discord.TextStyle.paragraph,
+                placeholder="Optional: Tips, guidelines, or suggestions for the contributor...",
+                required=False,
+                max_length=1000,
+            )
+        else:
+            self.message_input = discord.ui.TextInput(
+                label="Reason / Feedback (Optional)",
+                style=discord.TextStyle.paragraph,
+                placeholder="Optional: Reason for declining or suggestions for other issues...",
+                required=False,
+                max_length=1000,
+            )
+        self.add_item(self.message_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw_val = self.message_input.value.strip() if self.message_input.value else ""
+        note = raw_val or None
+        target_message = self.source_message or interaction.message
+        await self.callback(interaction, self.request_id, note, target_message)
+
+
+
 def github_profile_settings_url(api_base: str) -> str:
     """Derive the GitHub web profile settings URL from config.github.api_base."""
     base = api_base.rstrip("/")
@@ -1762,7 +1805,7 @@ def run_bot(config_path: str) -> None:
                     eligible_roles = []
                     assignments_cfg = getattr(config, "assignments", None)
                     if assignments_cfg:
-                        eligible_roles = getattr(assignments_cfg, "issue_assignees", []) or []
+                        eligible_roles = getattr(assignments_cfg, "issue_request_eligible_roles", []) or []
 
                     header, embed_dict = build_mentor_claim_card(
                         request=req_dict,
@@ -1785,23 +1828,42 @@ def run_bot(config_path: str) -> None:
     async def handle_claim_approve(
         interaction: discord.Interaction,
         request_id: str,
+        note: str | None = None,
+        target_message: discord.Message | None = None,
     ) -> None:
-        is_mentor = slash_command_allowed(
-            interaction, config, "assign-issue", allow_all_by_default=False
-        ) or slash_command_allowed(
-            interaction, config, "issue-requests", allow_all_by_default=False
-        ) or (
-            hasattr(interaction.user, "guild_permissions")
-            and interaction.user.guild_permissions.administrator
+        is_mentor = (
+            slash_command_allowed(
+                interaction, config, "claim-approval", allow_all_by_default=False
+            )
+            or slash_command_allowed(
+                interaction, config, "claim-issue", allow_all_by_default=False
+            )
+            or slash_command_allowed(
+                interaction, config, "assign-issue", allow_all_by_default=False
+            )
+            or slash_command_allowed(
+                interaction, config, "issue-requests", allow_all_by_default=False
+            )
+            or (
+                hasattr(interaction.user, "guild_permissions")
+                and interaction.user.guild_permissions.administrator
+            )
         )
         if not is_mentor:
-            await interaction.response.send_message(
-                "❌ Only mentors can approve issue claim requests.",
-                ephemeral=True,
-            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Only mentors can approve issue claim requests.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ Only mentors can approve issue claim requests.",
+                    ephemeral=True,
+                )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
 
         mentor_discord_id = str(interaction.user.id)
         mentor_github = resolve_discord_to_github(storage, mentor_discord_id)
@@ -1819,6 +1881,7 @@ def run_bot(config_path: str) -> None:
             request_id,
             mentor_discord_id,
             mentor_github,
+            note,
         )
 
         if not ok or not req:
@@ -1831,27 +1894,32 @@ def run_bot(config_path: str) -> None:
             if target_user is None:
                 target_user = await client.fetch_user(int(req["discord_user_id"]))
             if target_user:
+                note_block = f"\n\n💬 **Mentor Note / Guidance:**\n> {note}\n" if note else "\n"
                 await target_user.send(
                     f"🎉 **Issue Claim Approved!**\n\n"
                     f"Great news! Your claim request for **#{req['issue_number']}** in `{req['owner']}/{req['repo']}` "
                     f"has been **approved** by a mentor, and you are now officially *assigned* on GitHub!\n\n"
-                    f"🔗 **Issue Link:** {req.get('issue_url')}\n\n"
+                    f"🔗 **Issue Link:** {req.get('issue_url')}"
+                    f"{note_block}\n"
                     f"💡 *You're all set to begin work. If you have any questions or need guidance, feel free to reach out in the channel. Good luck!*"
                 )
         except Exception as exc:
             logger.warning("Could not send DM to contributor on claim approval: %s", exc)
 
         # Update prompt message in channel
-        if interaction.message:
+        msg_to_edit = target_message or interaction.message
+        if msg_to_edit:
             try:
                 content = (
                     f"🔔 **Issue Request: #{req['issue_number']}** in `{req['owner']}/{req['repo']}`\n"
                     f"**Requester:** `{req['github_user']}` (<@{req['discord_user_id']}>)\n\n"
                     f"✅ **Approved & Assigned** by <@{mentor_discord_id}>"
                 )
-                await interaction.message.edit(content=content, view=None)
-            except Exception:
-                pass
+                if note:
+                    content += f"\n💬 **Mentor Note:** {note}"
+                await msg_to_edit.edit(content=content, view=None)
+            except Exception as exc:
+                logger.debug("Could not edit prompt message: %s", exc)
 
         await interaction.followup.send(
             f"✅ Approved and assigned @{req['github_user']} to #{req['issue_number']}.",
@@ -1861,23 +1929,42 @@ def run_bot(config_path: str) -> None:
     async def handle_claim_decline(
         interaction: discord.Interaction,
         request_id: str,
+        note: str | None = None,
+        target_message: discord.Message | None = None,
     ) -> None:
-        is_mentor = slash_command_allowed(
-            interaction, config, "assign-issue", allow_all_by_default=False
-        ) or slash_command_allowed(
-            interaction, config, "issue-requests", allow_all_by_default=False
-        ) or (
-            hasattr(interaction.user, "guild_permissions")
-            and interaction.user.guild_permissions.administrator
+        is_mentor = (
+            slash_command_allowed(
+                interaction, config, "claim-approval", allow_all_by_default=False
+            )
+            or slash_command_allowed(
+                interaction, config, "claim-issue", allow_all_by_default=False
+            )
+            or slash_command_allowed(
+                interaction, config, "assign-issue", allow_all_by_default=False
+            )
+            or slash_command_allowed(
+                interaction, config, "issue-requests", allow_all_by_default=False
+            )
+            or (
+                hasattr(interaction.user, "guild_permissions")
+                and interaction.user.guild_permissions.administrator
+            )
         )
         if not is_mentor:
-            await interaction.response.send_message(
-                "❌ Only mentors can decline issue claim requests.",
-                ephemeral=True,
-            )
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ Only mentors can decline issue claim requests.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ Only mentors can decline issue claim requests.",
+                    ephemeral=True,
+                )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
 
         mentor_discord_id = str(interaction.user.id)
         mentor_github = resolve_discord_to_github(storage, mentor_discord_id)
@@ -1888,6 +1975,7 @@ def run_bot(config_path: str) -> None:
             request_id,
             mentor_discord_id,
             mentor_github,
+            note,
         )
 
         if not ok or not req:
@@ -1900,10 +1988,17 @@ def run_bot(config_path: str) -> None:
             if target_user is None:
                 target_user = await client.fetch_user(int(req["discord_user_id"]))
             if target_user:
+                if note:
+                    reason_text = f"\n💬 **Mentor Feedback / Reason:**\n> {note}\n"
+                else:
+                    reason_text = (
+                        "\n*(This usually happens if another contributor was assigned first "
+                        "or if the issue requires specific experience.)*\n"
+                    )
                 await target_user.send(
                     f"📋 **Issue Claim Update**\n\n"
                     f"Hello! Regarding your request to claim **#{req['issue_number']}** in `{req['owner']}/{req['repo']}`:\n\n"
-                    f"Your request was *declined by a mentor* (this usually happens if another contributor was assigned first or if the issue requires specific experience).\n\n"
+                    f"Your request was *declined by a mentor*.{reason_text}\n"
                     f"💡 *Don't be discouraged!* You can:\n"
                     f"• *Ask a mentor* in the community chat for guidance or feedback\n"
                     f"• *Check out another open issue* in the announcement channel\n\n"
@@ -1913,16 +2008,19 @@ def run_bot(config_path: str) -> None:
             logger.warning("Could not send DM to contributor on claim decline: %s", exc)
 
         # Update prompt message in channel
-        if interaction.message:
+        msg_to_edit = target_message or interaction.message
+        if msg_to_edit:
             try:
                 content = (
                     f"🔔 **Issue Request: #{req['issue_number']}** in `{req['owner']}/{req['repo']}`\n"
                     f"**Requester:** `{req['github_user']}` (<@{req['discord_user_id']}>)\n\n"
                     f"❌ **Declined** by <@{mentor_discord_id}>"
                 )
-                await interaction.message.edit(content=content, view=None)
-            except Exception:
-                pass
+                if note:
+                    content += f"\n💬 **Reason:** {note}"
+                await msg_to_edit.edit(content=content, view=None)
+            except Exception as exc:
+                logger.debug("Could not edit prompt message: %s", exc)
 
         await interaction.followup.send(
             f"❌ Claim request for #{req['issue_number']} was declined.",
@@ -1945,10 +2043,70 @@ def run_bot(config_path: str) -> None:
                     pass
         elif custom_id.startswith("claim_approve:"):
             req_id = custom_id.split(":", 1)[1]
-            await handle_claim_approve(interaction, req_id)
+            is_mentor = (
+                slash_command_allowed(
+                    interaction, config, "claim-approval", allow_all_by_default=False
+                )
+                or slash_command_allowed(
+                    interaction, config, "claim-issue", allow_all_by_default=False
+                )
+                or slash_command_allowed(
+                    interaction, config, "assign-issue", allow_all_by_default=False
+                )
+                or slash_command_allowed(
+                    interaction, config, "issue-requests", allow_all_by_default=False
+                )
+                or (
+                    hasattr(interaction.user, "guild_permissions")
+                    and interaction.user.guild_permissions.administrator
+                )
+            )
+            if not is_mentor:
+                await interaction.response.send_message(
+                    "❌ Only mentors can approve issue claim requests.",
+                    ephemeral=True,
+                )
+                return
+            modal = ClaimFeedbackModal(
+                action="approve",
+                request_id=req_id,
+                source_message=interaction.message,
+                callback=handle_claim_approve,
+            )
+            await interaction.response.send_modal(modal)
         elif custom_id.startswith("claim_decline:"):
             req_id = custom_id.split(":", 1)[1]
-            await handle_claim_decline(interaction, req_id)
+            is_mentor = (
+                slash_command_allowed(
+                    interaction, config, "claim-approval", allow_all_by_default=False
+                )
+                or slash_command_allowed(
+                    interaction, config, "claim-issue", allow_all_by_default=False
+                )
+                or slash_command_allowed(
+                    interaction, config, "assign-issue", allow_all_by_default=False
+                )
+                or slash_command_allowed(
+                    interaction, config, "issue-requests", allow_all_by_default=False
+                )
+                or (
+                    hasattr(interaction.user, "guild_permissions")
+                    and interaction.user.guild_permissions.administrator
+                )
+            )
+            if not is_mentor:
+                await interaction.response.send_message(
+                    "❌ Only mentors can decline issue claim requests.",
+                    ephemeral=True,
+                )
+                return
+            modal = ClaimFeedbackModal(
+                action="decline",
+                request_id=req_id,
+                source_message=interaction.message,
+                callback=handle_claim_decline,
+            )
+            await interaction.response.send_modal(modal)
 
     @tree.command(
         name="claim-issue",
